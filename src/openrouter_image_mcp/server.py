@@ -133,7 +133,8 @@ def _preview(data: bytes) -> Image:
     return Image(data=buf.getvalue(), format="png")
 
 
-@mcp.tool()
+# Unstructured: the result mixes text and image previews, which structured output cannot serialize.
+@mcp.tool(structured_output=False)
 def generate_image(
     prompt: str,
     model: str | None = None,
