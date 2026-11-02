@@ -35,8 +35,8 @@ uv --directory <this folder> run openrouter-image-mcp
 ```
 
 over stdio, from a launcher that sets the environment above. A project
-launcher should keep the key in a project-specific variable and map it to
-`OPENROUTER_API_KEY` only for this process.
+launcher should keep its own key (for example in the project's gitignored
+`.env`) and pass it as `OPENROUTER_API_KEY` only to this process.
 
 ## Checks
 
