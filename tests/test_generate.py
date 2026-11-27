@@ -12,14 +12,19 @@ from PIL import Image as PILImage
 from openrouter_image_mcp import server
 
 
-def _png_bytes() -> bytes:
+def _image_bytes(fmt: str) -> bytes:
+    """A 64x64 half-transparent red square."""
     buf = io.BytesIO()
-    PILImage.new("RGBA", (64, 64), (255, 0, 0, 128)).save(buf, format="PNG")
+    PILImage.new("RGBA", (64, 64), (255, 0, 0, 128)).save(buf, format=fmt)
     return buf.getvalue()
 
 
-def _item(data: bytes) -> dict:
-    return {"b64_json": base64.b64encode(data).decode(), "media_type": "image/png"}
+def _png_bytes() -> bytes:
+    return _image_bytes("PNG")
+
+
+def _item(data: bytes, media_type: str = "image/png") -> dict:
+    return {"b64_json": base64.b64encode(data).decode(), "media_type": media_type}
 
 
 class _Fake:
@@ -91,6 +96,32 @@ def test_generate_image_through_fastmcp_returns_text_and_preview(tmp_path, fake)
     sidecar = json.loads((tmp_path / "out" / "a.json").read_text(encoding="utf-8"))
     assert sidecar["model"] == "m" and sidecar["cost_usd"] == 0.01
     assert fake.posts[0]["prompt"] == "a dot"
+    # Already in the requested format: saved byte for byte.
+    assert (tmp_path / "out" / "a.png").read_bytes() == _png_bytes()
+    assert sidecar["media_type"] == "image/png" and "converted_from" not in sidecar
+
+
+def test_webp_returned_for_png_is_saved_as_png(tmp_path, fake):
+    fake.items = [_item(_image_bytes("WEBP"), "image/webp")]
+
+    summary, kinds = _generate(out_path="out/a.png")
+
+    with PILImage.open(tmp_path / "out" / "a.png") as img:
+        assert (img.format, img.mode, img.size) == ("PNG", "RGBA", (64, 64))
+    sidecar = json.loads((tmp_path / "out" / "a.json").read_text(encoding="utf-8"))
+    assert sidecar["media_type"] == "image/png" and sidecar["converted_from"] == "image/webp"
+    assert kinds == ["text", "image"] and "warnings" not in summary
+
+
+def test_transparent_png_returned_for_jpeg_is_flattened_onto_white(tmp_path, fake):
+    _generate(out_path="out/a.jpg", output_format="jpeg")
+
+    with PILImage.open(tmp_path / "out" / "a.jpg") as img:
+        assert (img.format, img.mode) == ("JPEG", "RGB")
+        r, g, b = img.getpixel((32, 32))
+    assert r > 240 and 100 < g < 160 and 100 < b < 160  # half-transparent red over white
+    sidecar = json.loads((tmp_path / "out" / "a.json").read_text(encoding="utf-8"))
+    assert sidecar["media_type"] == "image/jpeg" and sidecar["converted_from"] == "image/png"
 
 
 def test_failed_preview_does_not_lose_later_images(tmp_path, fake):

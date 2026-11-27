@@ -145,6 +145,37 @@ def _preview(data: bytes) -> Image:
     return Image(data=buf.getvalue(), format="png")
 
 
+_PILLOW_FORMATS = {"png": "PNG", "jpeg": "JPEG", "jpg": "JPEG", "webp": "WEBP"}
+_SAVE_OPTIONS = {"JPEG": {"quality": 95}, "WEBP": {"lossless": True}}
+
+
+def _as_format(data: bytes, output_format: str) -> tuple[bytes, str | None, str | None]:
+    """*data* as *output_format*, converted with Pillow if the model returned another format.
+
+    Models do not always honour output_format (some return WebP when PNG was
+    asked for). Returns the bytes, their media type, and the media type they
+    arrived in when they were converted (else None). Bytes already in the right
+    format are returned untouched; a format not listed here is left alone.
+    """
+    target = _PILLOW_FORMATS.get(output_format.lower())
+    if target is None:
+        return data, None, None
+    with PILImage.open(io.BytesIO(data)) as img:
+        returned = img.format
+        if returned == target:
+            return data, PILImage.MIME[target], None
+        icc = img.info.get("icc_profile")
+        if target == "JPEG" and img.mode not in ("RGB", "L"):
+            rgba = img.convert("RGBA")  # JPEG has no transparency: flatten onto white
+            img = PILImage.new("RGB", rgba.size, (255, 255, 255))
+            img.paste(rgba, mask=rgba.getchannel("A"))
+        elif target != "JPEG" and img.mode not in ("RGB", "RGBA", "L", "LA", "P"):
+            img = img.convert("RGBA")
+        buf = io.BytesIO()
+        img.save(buf, format=target, icc_profile=icc, **_SAVE_OPTIONS.get(target, {}))
+    return buf.getvalue(), PILImage.MIME[target], PILImage.MIME.get(returned or "", returned)
+
+
 def _write_new(path: str, data: bytes, overwrite: bool) -> str:
     """Write *data* to *path*, or, unless *overwrite*, to the next free ``-vN`` name."""
     if overwrite:
@@ -162,9 +193,10 @@ def _write_new(path: str, data: bytes, overwrite: bool) -> str:
 
 
 def _save_images(
-    images: list[Any], target: str, count: int, record: dict[str, Any], overwrite: bool, preview: bool,
+    images: list[Any], target: str, count: int, output_format: str, record: dict[str, Any], overwrite: bool,
+    preview: bool,
 ) -> tuple[list[str], list[str], list[Image]]:
-    """Save every usable image and its sidecar, then make previews.
+    """Save every usable image (in *output_format*) and its sidecar, then make previews.
 
     The images are already paid for, so one bad item never stops the others;
     what went wrong is returned as warnings.
@@ -177,6 +209,11 @@ def _save_images(
         except (KeyError, TypeError, ValueError) as e:
             warnings.append(f"Image {i + 1}: no usable image data in the response ({e!r}).")
             continue
+        try:
+            data, media_type, converted_from = _as_format(data, output_format)
+        except Exception as e:  # Pillow raises many types; keep the image as it came
+            media_type, converted_from = item.get("media_type"), None
+            warnings.append(f"Image {i + 1}: could not be read to check its format ({e}); saved as returned.")
         wanted = numbered(target, i, count)
         try:
             path = _write_new(wanted, data, overwrite)
@@ -188,8 +225,11 @@ def _save_images(
             warnings.append(f"{wanted} was taken; saved as {path}.")
         try:
             with open(sidecar_path(path), "w", encoding="utf-8") as f:
-                json.dump({**record, "file": os.path.basename(path), "index": i, "count": len(images),
-                           "media_type": item.get("media_type")}, f, indent=2)
+                sidecar = {**record, "file": os.path.basename(path), "index": i, "count": len(images),
+                           "media_type": media_type or item.get("media_type")}
+                if converted_from:
+                    sidecar["converted_from"] = converted_from
+                json.dump(sidecar, f, indent=2)
         except OSError as e:
             warnings.append(f"{path}: sidecar not written: {e}")
 
@@ -232,6 +272,8 @@ async def generate_image(
     - aspect_ratio ("16:9"), resolution ("1K", "2K", "4K"), quality, background
       ("transparent", "opaque", "auto"), seed: passed through when set; which
       ones a model accepts is in list_image_models.
+    - output_format: "png" (default), "jpeg" or "webp". An image the model
+      returns in another format is converted before it is saved.
     - extra_params: other provider parameters, passed through unchanged.
     - overwrite: replace existing files at out_path. Without it an existing
       file is an error, raised before anything is paid for.
@@ -288,7 +330,7 @@ async def generate_image(
     # numbered ones if a model returns extra images. Disk and Pillow work runs off the
     # event loop.
     saved, warnings, previews = await asyncio.to_thread(
-        _save_images, images, target, max(n, len(images)), record, overwrite, preview)
+        _save_images, images, target, max(n, len(images)), output_format, record, overwrite, preview)
     if not saved:
         raise RuntimeError(f"No image could be saved (cost {usage.get('cost')} USD, id {body.get('id')}): "
                            + " ".join(warnings))
