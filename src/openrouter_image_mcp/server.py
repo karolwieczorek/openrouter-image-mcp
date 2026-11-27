@@ -133,6 +133,47 @@ def _preview(data: bytes) -> Image:
     return Image(data=buf.getvalue(), format="png")
 
 
+def _save_images(
+    images: list[Any], target: str, record: dict[str, Any], preview: bool,
+) -> tuple[list[str], list[str], list[Image]]:
+    """Save every usable image and its sidecar, then make previews.
+
+    The images are already paid for, so one bad item never stops the others;
+    what went wrong is returned as warnings.
+    """
+    saved: list[tuple[str, bytes]] = []
+    warnings: list[str] = []
+    for i, item in enumerate(images):
+        try:
+            data = base64.b64decode(item["b64_json"])
+        except (KeyError, TypeError, ValueError) as e:
+            warnings.append(f"Image {i + 1}: no usable image data in the response ({e!r}).")
+            continue
+        path = numbered(target, i, len(images))
+        try:
+            with open(path, "wb") as f:
+                f.write(data)
+        except OSError as e:
+            warnings.append(f"Image {i + 1}: could not be saved to {path}: {e}")
+            continue
+        saved.append((path, data))
+        try:
+            with open(os.path.splitext(path)[0] + ".json", "w", encoding="utf-8") as f:
+                json.dump({**record, "file": os.path.basename(path), "index": i, "count": len(images),
+                           "media_type": item.get("media_type")}, f, indent=2)
+        except OSError as e:
+            warnings.append(f"{path}: sidecar not written: {e}")
+
+    previews: list[Image] = []
+    if preview:
+        for path, data in saved:
+            try:
+                previews.append(_preview(data))
+            except Exception as e:  # Pillow raises many types; the image is saved either way
+                warnings.append(f"{path}: no preview ({e}).")
+    return [path for path, _ in saved], warnings, previews
+
+
 # Unstructured: the result mixes text and image previews, which structured output cannot serialize.
 @mcp.tool(structured_output=False)
 def generate_image(
@@ -163,8 +204,8 @@ def generate_image(
     - extra_params: other provider parameters, passed through unchanged.
     - preview: also return a small preview of each image.
 
-    Returns the saved paths, the actual cost and previews. A .json sidecar next
-    to each image records the request and the cost.
+    Returns the saved paths, the actual cost, any warnings and previews. A .json
+    sidecar next to each image records the request and the cost.
     """
     model = model or os.environ.get("IMAGE_GEN_DEFAULT_MODEL", "").strip()
     if not model:
@@ -174,6 +215,7 @@ def generate_image(
     root = _output_root()
     default_dir = os.environ.get("IMAGE_GEN_DEFAULT_DIR", "generated")
     target = resolve_inside(root, out_path or default_image_path(default_dir, prompt, output_format))
+    os.makedirs(os.path.dirname(target), exist_ok=True)
 
     refs = [_reference(root, r) for r in (references or [])]
     payload = build_payload(prompt, model, refs, aspect_ratio, resolution, quality, background,
@@ -184,10 +226,10 @@ def generate_image(
     _raise_for_status(response)
     body = response.json()
     images = body.get("data") or []
-    if not images:
-        raise RuntimeError("OpenRouter returned no images.")
-
     usage = body.get("usage") or {}
+    if not images:
+        raise RuntimeError(f"OpenRouter returned no images (cost {usage.get('cost')} USD, id {body.get('id')}).")
+
     record = {
         "created": datetime.datetime.now().isoformat(timespec="seconds"),
         "model": model,
@@ -199,22 +241,14 @@ def generate_image(
         "response_id": body.get("id"),
     }
 
-    os.makedirs(os.path.dirname(target), exist_ok=True)
-    saved: list[str] = []
-    previews: list[Image] = []
-    for i, item in enumerate(images):
-        data = base64.b64decode(item["b64_json"])
-        path = numbered(target, i, len(images))
-        with open(path, "wb") as f:
-            f.write(data)
-        with open(os.path.splitext(path)[0] + ".json", "w", encoding="utf-8") as f:
-            json.dump({**record, "file": os.path.basename(path), "index": i, "count": len(images),
-                       "media_type": item.get("media_type")}, f, indent=2)
-        saved.append(path)
-        if preview:
-            previews.append(_preview(data))
+    saved, warnings, previews = _save_images(images, target, record, preview)
+    if not saved:
+        raise RuntimeError(f"No image could be saved (cost {usage.get('cost')} USD, id {body.get('id')}): "
+                           + " ".join(warnings))
 
-    summary = {"saved": saved, "cost_usd": usage.get("cost"), "model": model}
+    summary: dict[str, Any] = {"saved": saved, "cost_usd": usage.get("cost"), "model": model}
+    if warnings:
+        summary["warnings"] = warnings
     return [json.dumps(summary, indent=2), *previews]
 
 
