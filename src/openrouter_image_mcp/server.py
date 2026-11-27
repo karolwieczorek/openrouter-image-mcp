@@ -132,9 +132,10 @@ def _reference(root: str, ref: str) -> dict[str, Any]:
         url = ref
     else:
         path = resolve_inside(root, ref)
+        media_type = media_type_for(path)  # before reading, so a non-image file is never loaded
         with open(path, "rb") as f:
             data = base64.b64encode(f.read()).decode("ascii")
-        url = f"data:{media_type_for(path)};base64,{data}"
+        url = f"data:{media_type};base64,{data}"
     return {"type": "image_url", "image_url": {"url": url}}
 
 

@@ -34,6 +34,12 @@ def test_reference_file_becomes_data_url(tmp_path):
     assert ref["image_url"]["url"].startswith("data:image/png;base64,")
 
 
+def test_reference_type_is_checked_before_the_file_is_read(tmp_path):
+    # The file does not exist: an unsupported type must be the error, not a missing file.
+    with pytest.raises(ValueError, match="Unsupported reference image type"):
+        server._reference(str(tmp_path), "notes.txt")
+
+
 def test_reference_outside_root_is_refused(tmp_path):
     root = tmp_path / "root"
     root.mkdir()
