@@ -9,7 +9,8 @@ hands it that project's API key and the one folder it may write to.
 - `generate_image`: text to image, or image-guided (`references`: paths
   inside the output root or HTTP(S) URLs). Saves each image plus a `.json`
   sidecar with the prompt, model, parameters and actual cost, and returns
-  small previews.
+  small previews. It never replaces an existing file unless `overwrite` is
+  set: an `out_path` that is taken is refused before anything is paid for.
 - `list_image_models`: models, their parameters and, on request, prices
   (per token for input text, input images and output images).
 - `get_key_status`: the key's limit, remaining credit, usage per day, week

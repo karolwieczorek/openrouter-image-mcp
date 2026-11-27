@@ -3,7 +3,16 @@ import os
 
 import pytest
 
-from openrouter_image_mcp.paths import default_image_path, media_type_for, numbered, resolve_inside, slugify
+from openrouter_image_mcp.paths import (
+    default_image_path,
+    free_target,
+    is_taken,
+    media_type_for,
+    numbered,
+    resolve_inside,
+    slugify,
+    with_extension,
+)
 
 
 def test_relative_path_resolves_inside_root(tmp_path):
@@ -56,3 +65,26 @@ def test_reference_media_types():
     assert media_type_for("x.JPG") == "image/jpeg"
     with pytest.raises(ValueError):
         media_type_for("x.gif")
+
+
+def test_extension_is_added_or_must_match_the_format():
+    assert with_extension("out/a", "png") == "out/a.png"
+    assert with_extension("out/a.JPG", "jpeg") == "out/a.JPG"
+    with pytest.raises(ValueError):
+        with_extension("out/a.png", "jpeg")
+    with pytest.raises(ValueError):
+        with_extension("out/a.json", "json")
+
+
+def test_a_sidecar_alone_makes_a_name_taken(tmp_path):
+    (tmp_path / "a.json").write_text("{}")
+    assert is_taken(str(tmp_path / "a.png"))
+    assert not is_taken(str(tmp_path / "b.png"))
+
+
+def test_free_target_skips_names_used_by_any_file_of_the_batch(tmp_path):
+    target = str(tmp_path / "a.png")
+    assert free_target(target, 1) == target
+    (tmp_path / "a-2.png").write_bytes(b"x")
+    assert free_target(target, 1) == target
+    assert free_target(target, 2) == str(tmp_path / "a-v2.png")

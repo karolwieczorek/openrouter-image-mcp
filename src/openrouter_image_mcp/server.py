@@ -25,7 +25,17 @@ import httpx
 from mcp.server.fastmcp import FastMCP, Image
 from PIL import Image as PILImage
 
-from .paths import default_image_path, media_type_for, numbered, resolve_inside
+from .paths import (
+    batch_paths,
+    default_image_path,
+    free_target,
+    is_taken,
+    media_type_for,
+    numbered,
+    resolve_inside,
+    sidecar_path,
+    with_extension,
+)
 
 API = "https://openrouter.ai/api/v1"
 GENERATE_TIMEOUT = 300.0
@@ -134,8 +144,24 @@ def _preview(data: bytes) -> Image:
     return Image(data=buf.getvalue(), format="png")
 
 
+def _write_new(path: str, data: bytes, overwrite: bool) -> str:
+    """Write *data* to *path*, or, unless *overwrite*, to the next free ``-vN`` name."""
+    if overwrite:
+        with open(path, "wb") as f:
+            f.write(data)
+        return path
+    while True:
+        path = free_target(path, 1)
+        try:
+            with open(path, "xb") as f:  # exclusive: a concurrent call cannot slip in between
+                f.write(data)
+            return path
+        except FileExistsError:
+            continue
+
+
 def _save_images(
-    images: list[Any], target: str, record: dict[str, Any], preview: bool,
+    images: list[Any], target: str, count: int, record: dict[str, Any], overwrite: bool, preview: bool,
 ) -> tuple[list[str], list[str], list[Image]]:
     """Save every usable image and its sidecar, then make previews.
 
@@ -150,16 +176,17 @@ def _save_images(
         except (KeyError, TypeError, ValueError) as e:
             warnings.append(f"Image {i + 1}: no usable image data in the response ({e!r}).")
             continue
-        path = numbered(target, i, len(images))
+        wanted = numbered(target, i, count)
         try:
-            with open(path, "wb") as f:
-                f.write(data)
+            path = _write_new(wanted, data, overwrite)
         except OSError as e:
-            warnings.append(f"Image {i + 1}: could not be saved to {path}: {e}")
+            warnings.append(f"Image {i + 1}: could not be saved to {wanted}: {e}")
             continue
         saved.append((path, data))
+        if path != wanted:
+            warnings.append(f"{wanted} was taken; saved as {path}.")
         try:
-            with open(os.path.splitext(path)[0] + ".json", "w", encoding="utf-8") as f:
+            with open(sidecar_path(path), "w", encoding="utf-8") as f:
                 json.dump({**record, "file": os.path.basename(path), "index": i, "count": len(images),
                            "media_type": item.get("media_type")}, f, indent=2)
         except OSError as e:
@@ -190,19 +217,23 @@ async def generate_image(
     seed: int | None = None,
     n: int = 1,
     extra_params: dict[str, Any] | None = None,
+    overwrite: bool = False,
     preview: bool = True,
 ) -> list[Any]:
     """Generate (or, with references, edit or restyle) images and save them.
 
     - model: an OpenRouter image model id; defaults to IMAGE_GEN_DEFAULT_MODEL.
     - out_path: file path inside the output root (relative paths are relative to
-      it); default is a timestamped name in the default folder. With n > 1 the
-      files are numbered.
+      it); default is a timestamped name in the default folder. Its extension
+      must match output_format and is added if missing. With n > 1 the files are
+      numbered.
     - references: input images, as paths inside the output root or HTTP(S) URLs.
     - aspect_ratio ("16:9"), resolution ("1K", "2K", "4K"), quality, background
       ("transparent", "opaque", "auto"), seed: passed through when set; which
       ones a model accepts is in list_image_models.
     - extra_params: other provider parameters, passed through unchanged.
+    - overwrite: replace existing files at out_path. Without it an existing
+      file is an error, raised before anything is paid for.
     - preview: also return a small preview of each image.
 
     Returns the saved paths, the actual cost, any warnings and previews. A .json
@@ -215,7 +246,17 @@ async def generate_image(
         raise ValueError("n must be between 1 and 10.")
     root = _output_root()
     default_dir = os.environ.get("IMAGE_GEN_DEFAULT_DIR", "generated")
-    target = resolve_inside(root, out_path or default_image_path(default_dir, prompt, output_format))
+    relative = out_path or default_image_path(default_dir, prompt, output_format)
+    target = resolve_inside(root, with_extension(relative, output_format))
+    if not out_path:
+        target = free_target(target, n)
+    elif not overwrite:
+        taken = [p for p in batch_paths(target, n) if is_taken(p)]
+        if taken:
+            raise FileExistsError(f"Already exists (pass overwrite=true or another out_path): {', '.join(taken)}")
+    for path in batch_paths(target, n):
+        if os.path.isdir(path):
+            raise IsADirectoryError(f"out_path names a folder: {path}")
     os.makedirs(os.path.dirname(target), exist_ok=True)
 
     refs = [_reference(root, r) for r in (references or [])]
@@ -242,8 +283,11 @@ async def generate_image(
         "response_id": body.get("id"),
     }
 
-    # Disk and Pillow work runs off the event loop.
-    saved, warnings, previews = await asyncio.to_thread(_save_images, images, target, record, preview)
+    # Numbered by the larger of n and what came back: the names checked above, plus
+    # numbered ones if a model returns extra images. Disk and Pillow work runs off the
+    # event loop.
+    saved, warnings, previews = await asyncio.to_thread(
+        _save_images, images, target, max(n, len(images)), record, overwrite, preview)
     if not saved:
         raise RuntimeError(f"No image could be saved (cost {usage.get('cost')} USD, id {body.get('id')}): "
                            + " ".join(warnings))

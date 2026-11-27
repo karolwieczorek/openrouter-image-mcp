@@ -45,6 +45,53 @@ def numbered(path: str, index: int, count: int) -> str:
     return f"{base}-{index + 1}{ext}"
 
 
+_FORMAT_EXTENSIONS = {
+    "png": {".png"},
+    "jpeg": {".jpg", ".jpeg"},
+    "jpg": {".jpg", ".jpeg"},
+    "webp": {".webp"},
+}
+
+
+def with_extension(path: str, output_format: str) -> str:
+    """*path* with the extension of *output_format*, added if it has none.
+
+    A different extension is refused, so a PNG is never saved as ``.jpg`` and
+    an image never shares its ``.json`` sidecar's name.
+    """
+    fmt = output_format.lower()
+    ext = os.path.splitext(path)[1]
+    if not ext:
+        path, ext = f"{path}.{fmt}", f".{fmt}"
+    if ext.lower() == ".json" or ext.lower() not in _FORMAT_EXTENSIONS.get(fmt, {f".{fmt}"}):
+        raise ValueError(f"'{path}' does not match output_format '{output_format}'.")
+    return path
+
+
+def sidecar_path(image_path: str) -> str:
+    """The ``.json`` record kept next to an image."""
+    return os.path.splitext(image_path)[0] + ".json"
+
+
+def is_taken(image_path: str) -> bool:
+    """True if the image or its sidecar already exists."""
+    return os.path.lexists(image_path) or os.path.lexists(sidecar_path(image_path))
+
+
+def batch_paths(target: str, count: int) -> list[str]:
+    return [numbered(target, i, count) for i in range(count)]
+
+
+def free_target(target: str, count: int) -> str:
+    """*target*, or ``<name>-v2``, ``-v3`` ... so that no file of the batch exists yet."""
+    base, ext = os.path.splitext(target)
+    candidate, version = target, 1
+    while any(is_taken(p) for p in batch_paths(candidate, count)):
+        version += 1
+        candidate = f"{base}-v{version}{ext}"
+    return candidate
+
+
 def media_type_for(path: str) -> str:
     ext = os.path.splitext(path)[1].lower()
     if ext not in _IMAGE_TYPES:
