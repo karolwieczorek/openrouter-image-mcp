@@ -1,3 +1,4 @@
+import httpx
 import pytest
 
 from openrouter_image_mcp import server
@@ -45,6 +46,18 @@ def test_missing_key_is_a_clear_error(monkeypatch):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     with pytest.raises(server.ConfigError):
         server._headers(True)
+
+
+@pytest.mark.parametrize("body, expected", [
+    ({"json": {"error": {"message": "Insufficient credits"}}}, "Insufficient credits"),
+    ({"json": {"error": "Rate limited"}}, "Rate limited"),
+    ({"json": ["unexpected"]}, "unexpected"),
+    ({"text": "Bad gateway"}, "Bad gateway"),
+])
+def test_error_responses_keep_the_status_and_message(body, expected):
+    response = httpx.Response(402, request=httpx.Request("POST", "https://openrouter.ai/api/v1/images"), **body)
+    with pytest.raises(RuntimeError, match=f"returned 402: .*{expected}"):
+        server._raise_for_status(response)
 
 
 def test_key_status_never_includes_the_key():

@@ -86,9 +86,11 @@ def _raise_for_status(response: httpx.Response) -> None:
     if response.is_success:
         return
     try:
-        detail = response.json().get("error", {}).get("message") or response.text
+        body = response.json()
     except ValueError:
-        detail = response.text
+        body = None
+    error = body.get("error") if isinstance(body, dict) else None
+    detail = (error.get("message") if isinstance(error, dict) else error) or response.text
     raise RuntimeError(f"OpenRouter returned {response.status_code}: {str(detail)[:500]}")
 
 
