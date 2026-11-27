@@ -19,6 +19,13 @@ hands it that project's API key and the one folder it may write to.
 Spending limits live on OpenRouter (set a limit on the key); the server
 has none of its own.
 
+## Requirements
+
+- [uv](https://docs.astral.sh/uv/); it installs the dependencies on the
+  first run.
+- Python 3.11 or newer. uv downloads one if none is installed.
+- An OpenRouter API key, ideally one for this project with a limit set.
+
 ## Environment
 
 | Variable | Meaning |
