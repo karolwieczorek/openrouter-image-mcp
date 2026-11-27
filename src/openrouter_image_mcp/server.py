@@ -11,6 +11,7 @@ Configuration comes from the environment (the launching project sets it):
 - ``IMAGE_GEN_APP_TITLE``: the ``X-Title`` sent to OpenRouter (optional).
 """
 
+import asyncio
 import base64
 import datetime
 import io
@@ -176,7 +177,7 @@ def _save_images(
 
 # Unstructured: the result mixes text and image previews, which structured output cannot serialize.
 @mcp.tool(structured_output=False)
-def generate_image(
+async def generate_image(
     prompt: str,
     model: str | None = None,
     out_path: str | None = None,
@@ -221,8 +222,8 @@ def generate_image(
     payload = build_payload(prompt, model, refs, aspect_ratio, resolution, quality, background,
                             output_format, seed, n, extra_params)
 
-    with httpx.Client(timeout=GENERATE_TIMEOUT) as client:
-        response = client.post(f"{API}/images", headers=_headers(True), json=payload)
+    async with httpx.AsyncClient(timeout=GENERATE_TIMEOUT) as client:
+        response = await client.post(f"{API}/images", headers=_headers(True), json=payload)
     _raise_for_status(response)
     body = response.json()
     images = body.get("data") or []
@@ -241,7 +242,8 @@ def generate_image(
         "response_id": body.get("id"),
     }
 
-    saved, warnings, previews = _save_images(images, target, record, preview)
+    # Disk and Pillow work runs off the event loop.
+    saved, warnings, previews = await asyncio.to_thread(_save_images, images, target, record, preview)
     if not saved:
         raise RuntimeError(f"No image could be saved (cost {usage.get('cost')} USD, id {body.get('id')}): "
                            + " ".join(warnings))
@@ -260,7 +262,7 @@ def _matches(model: dict[str, Any], text: str | None) -> bool:
 
 
 @mcp.tool()
-def list_image_models(filter: str | None = None, with_pricing: bool = False) -> str:
+async def list_image_models(filter: str | None = None, with_pricing: bool = False) -> str:
     """List OpenRouter image models, optionally filtered by id or name.
 
     with_pricing fetches each matching model's endpoints for prices and
@@ -268,8 +270,8 @@ def list_image_models(filter: str | None = None, with_pricing: bool = False) -> 
     per token for input text, input images and output images; the actual cost of
     a generation is reported after it runs.
     """
-    with httpx.Client(timeout=QUERY_TIMEOUT) as client:
-        response = client.get(f"{API}/images/models", headers=_headers(False))
+    async with httpx.AsyncClient(timeout=QUERY_TIMEOUT) as client:
+        response = await client.get(f"{API}/images/models", headers=_headers(False))
         _raise_for_status(response)
         body = response.json()
         models = [m for m in (body.get("data", body) if isinstance(body, dict) else body) if _matches(m, filter)]
@@ -284,7 +286,7 @@ def list_image_models(filter: str | None = None, with_pricing: bool = False) -> 
                 "parameters": m.get("supported_parameters"),
             }
             if with_pricing and m.get("endpoints"):
-                ep = client.get(f"https://openrouter.ai{m['endpoints']}", headers=_headers(False))
+                ep = await client.get(f"https://openrouter.ai{m['endpoints']}", headers=_headers(False))
                 _raise_for_status(ep)
                 entry["endpoints"] = [
                     {"provider": e.get("provider_name"), "pricing": e.get("pricing")}
@@ -301,14 +303,14 @@ _KEY_FIELDS = (
 
 
 @mcp.tool()
-def get_key_status() -> str:
+async def get_key_status() -> str:
     """Remaining credit and usage of this project's OpenRouter key.
 
     Shows the key's limit, what is left, usage today, this week and this month,
     and the budgets OpenRouter enforces. The key itself is never shown.
     """
-    with httpx.Client(timeout=QUERY_TIMEOUT) as client:
-        response = client.get(f"{API}/key", headers=_headers(True))
+    async with httpx.AsyncClient(timeout=QUERY_TIMEOUT) as client:
+        response = await client.get(f"{API}/key", headers=_headers(True))
     _raise_for_status(response)
     data = response.json().get("data") or {}
     return json.dumps({k: data.get(k) for k in _KEY_FIELDS if k in data}, indent=2)

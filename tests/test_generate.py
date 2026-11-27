@@ -22,32 +22,44 @@ def _item(data: bytes) -> dict:
 
 
 class _Fake:
-    """Stands in for OpenRouter: POST /images answers with ``items``."""
+    """Stands in for OpenRouter: POST /images answers with ``items``, GET /key with a key record.
+
+    With ``gate`` set, POST /images waits until a GET /key has been answered.
+    """
 
     def __init__(self):
         self.items = [_item(_png_bytes())]
         self.posts = []
+        self.gate: asyncio.Event | None = None
 
     def client(self, *args, **kwargs):
         return _FakeClient(self)
 
 
 class _FakeClient:
-    """Stands in for httpx.Client."""
+    """Stands in for httpx.AsyncClient."""
 
     def __init__(self, fake):
         self.fake = fake
 
-    def __enter__(self):
+    async def __aenter__(self):
         return self
 
-    def __exit__(self, *exc):
+    async def __aexit__(self, *exc):
         return False
 
-    def post(self, url, headers=None, json=None):
+    async def post(self, url, headers=None, json=None):
         self.fake.posts.append(json)
+        if self.fake.gate is not None:
+            await self.fake.gate.wait()
         body = {"id": "gen-1", "data": self.fake.items, "usage": {"cost": 0.01}}
         return httpx.Response(200, json=body, request=httpx.Request("POST", url))
+
+    async def get(self, url, headers=None):
+        if self.fake.gate is not None:
+            self.fake.gate.set()
+        body = {"data": {"label": "k", "limit_remaining": 5.0}}
+        return httpx.Response(200, json=body, request=httpx.Request("GET", url))
 
 
 @pytest.fixture
@@ -55,7 +67,7 @@ def fake(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test")
     monkeypatch.setenv("IMAGE_GEN_OUTPUT_ROOT", str(tmp_path))
     f = _Fake()
-    monkeypatch.setattr(server.httpx, "Client", f.client)
+    monkeypatch.setattr(server.httpx, "AsyncClient", f.client)
     return f
 
 
@@ -104,3 +116,17 @@ def test_nothing_usable_is_an_error_that_names_the_cost(fake):
 
     with pytest.raises(ToolError, match="0.01 USD"):
         _generate(out_path="out/a.png")
+
+
+def test_a_running_generation_does_not_block_other_calls(tmp_path, fake):
+    async def both():
+        fake.gate = asyncio.Event()
+        generation = server.mcp.call_tool("generate_image", {"prompt": "a dot", "model": "m", "out_path": "out/a.png"})
+        status = server.mcp.call_tool("get_key_status", {})
+        return await asyncio.wait_for(asyncio.gather(generation, status), timeout=5)
+
+    _, status = asyncio.run(both())
+
+    status_content = status[0] if isinstance(status, tuple) else status
+    assert json.loads(status_content[0].text)["limit_remaining"] == 5.0
+    assert (tmp_path / "out" / "a.png").exists()
