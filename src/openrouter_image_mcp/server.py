@@ -43,8 +43,6 @@ QUERY_TIMEOUT = 30.0
 PREVIEW_SIZE = 768
 MAX_PRICED_MODELS = 15
 
-log = logging.getLogger("openrouter_image_mcp")
-
 mcp = FastMCP(
     "openrouter-image",
     instructions=(
