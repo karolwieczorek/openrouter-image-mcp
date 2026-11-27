@@ -46,3 +46,7 @@ uv run pytest
 ```
 
 The tests need no network or key.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
